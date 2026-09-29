@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ pub struct EventPump {
     receiver: mpsc::UnboundedReceiver<UiEvent>,
     sender: mpsc::UnboundedSender<UiEvent>,
     cancelled: Arc<AtomicBool>,
+    operation_generation: Arc<AtomicU64>,
     input_thread: Option<JoinHandle<()>>,
     tick_task: TokioJoinHandle<()>,
 }
@@ -24,13 +25,20 @@ impl EventPump {
     pub fn start() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
+        let operation_generation = Arc::new(AtomicU64::new(0));
 
         let input_sender = sender.clone();
         let input_cancelled = Arc::clone(&cancelled);
         let input_thread = thread::spawn(move || {
             while !input_cancelled.load(Ordering::Relaxed) {
-                let Ok(ready) = event::poll(Duration::from_millis(50)) else {
-                    continue;
+                let ready = match event::poll(Duration::from_millis(50)) {
+                    Ok(ready) => ready,
+                    Err(error) => {
+                        let _ = input_sender.send(UiEvent::TerminalFailure(format!(
+                            "failed to poll terminal input: {error}"
+                        )));
+                        break;
+                    }
                 };
                 if !ready {
                     continue;
@@ -39,7 +47,13 @@ impl EventPump {
                 let message = match event::read() {
                     Ok(Event::Key(key)) => Some(UiEvent::Key(key)),
                     Ok(Event::Resize(width, height)) => Some(UiEvent::Resize { width, height }),
-                    Ok(_) | Err(_) => None,
+                    Ok(_) => None,
+                    Err(error) => {
+                        let _ = input_sender.send(UiEvent::TerminalFailure(format!(
+                            "failed to read terminal input: {error}"
+                        )));
+                        break;
+                    }
                 };
 
                 if message.is_some_and(|message| input_sender.send(message).is_err()) {
@@ -63,6 +77,7 @@ impl EventPump {
             receiver,
             sender,
             cancelled,
+            operation_generation,
             input_thread: Some(input_thread),
             tick_task,
         }
@@ -74,10 +89,18 @@ impl EventPump {
 
     pub fn reload_inventory(&self, path: PathBuf) {
         let sender = self.sender.clone();
+        let operation_generation = Arc::clone(&self.operation_generation);
+        let generation = operation_generation.fetch_add(1, Ordering::Relaxed) + 1;
         tokio::task::spawn_blocking(move || {
             let result = Inventory::load(&path);
-            let _ = sender.send(UiEvent::InventoryReloaded(result));
+            if operation_generation.load(Ordering::Relaxed) == generation {
+                let _ = sender.send(UiEvent::InventoryReloaded(result));
+            }
         });
+    }
+
+    pub fn cancel_operation(&self) {
+        self.operation_generation.fetch_add(1, Ordering::Relaxed);
     }
 }
 

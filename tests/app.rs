@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use termr::app::{App, ConnectionStatus, Overlay, UiEvent, help_text};
+use termr::app::{App, AppAction, ConnectionStatus, Overlay, UiEvent, help_text};
 use termr::inventory::{Inventory, InventoryStore};
 
 const HOSTS: &str = r#"
@@ -52,6 +52,7 @@ hosts:
 "#,
     )
     .unwrap();
+    press(&mut app, KeyCode::Char('R'));
     app.update(UiEvent::InventoryReloaded(Ok(replacement)));
 
     assert!(app.selected_host_ids().is_empty());
@@ -103,6 +104,7 @@ fn reload_failure_is_actionable_and_closable() {
     let mut app = app();
     let error = Inventory::from_yaml("hosts: not-a-list").unwrap_err();
 
+    press(&mut app, KeyCode::Char('R'));
     app.update(UiEvent::InventoryReloaded(Err(error)));
 
     let Overlay::Error { title, message } = app.overlay() else {
@@ -117,10 +119,49 @@ fn reload_failure_is_actionable_and_closable() {
 #[test]
 fn ticks_advance_progress_feedback_during_background_work() {
     let mut app = app();
-    app.set_operation_in_progress(true);
+    press(&mut app, KeyCode::Char('R'));
     let before = app.progress_indicator();
 
     app.update(UiEvent::Tick);
 
     assert_ne!(app.progress_indicator(), before);
+}
+
+#[test]
+fn escape_cancels_reload_and_late_results_are_ignored() {
+    let mut app = app();
+    assert_eq!(
+        app.update(UiEvent::Key(KeyEvent::new(
+            KeyCode::Char('R'),
+            KeyModifiers::NONE,
+        ))),
+        AppAction::ReloadInventory
+    );
+
+    assert_eq!(
+        app.update(UiEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))),
+        AppAction::CancelOperation
+    );
+    assert!(!app.operation_in_progress());
+
+    let late_inventory = Inventory::from_yaml("hosts: []").unwrap();
+    app.update(UiEvent::InventoryReloaded(Ok(late_inventory)));
+    assert_eq!(app.inventory().current().hosts().len(), 2);
+}
+
+#[test]
+fn terminal_failures_become_actionable_runtime_errors() {
+    let mut app = app();
+
+    let action = app.update(UiEvent::TerminalFailure(
+        "failed to read terminal input: device unavailable".to_owned(),
+    ));
+
+    assert_eq!(
+        action,
+        AppAction::Fail("failed to read terminal input: device unavailable".to_owned())
+    );
 }

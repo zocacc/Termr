@@ -17,13 +17,16 @@ pub enum UiEvent {
         host_id: String,
         status: ConnectionStatus,
     },
+    TerminalFailure(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
     None,
     Quit,
     ReloadInventory,
+    CancelOperation,
+    Fail(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +111,9 @@ impl App {
                 AppAction::None
             }
             UiEvent::InventoryReloaded(result) => {
+                if !self.operation_in_progress {
+                    return AppAction::None;
+                }
                 self.operation_in_progress = false;
                 match result {
                     Ok(candidate) => {
@@ -141,6 +147,7 @@ impl App {
                 }
                 AppAction::None
             }
+            UiEvent::TerminalFailure(message) => AppAction::Fail(message),
             UiEvent::Tick => {
                 self.progress_frame = self.progress_frame.wrapping_add(1);
                 AppAction::None
@@ -163,10 +170,6 @@ impl App {
 
     pub fn operation_in_progress(&self) -> bool {
         self.operation_in_progress
-    }
-
-    pub fn set_operation_in_progress(&mut self, in_progress: bool) {
-        self.operation_in_progress = in_progress;
     }
 
     pub fn selected_host_ids(&self) -> &HashSet<String> {
@@ -331,8 +334,14 @@ impl App {
                 AppAction::None
             }
             KeyCode::Esc => {
-                self.status = "Ready".to_owned();
-                AppAction::None
+                if self.operation_in_progress {
+                    self.operation_in_progress = false;
+                    self.status = "Inventory reload cancelled".to_owned();
+                    AppAction::CancelOperation
+                } else {
+                    self.status = "Ready".to_owned();
+                    AppAction::None
+                }
             }
             KeyCode::Char('R') if !self.operation_in_progress => {
                 self.operation_in_progress = true;

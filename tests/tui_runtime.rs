@@ -5,7 +5,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use termr::app::{App, AppAction, UiEvent};
 use termr::inventory::{Inventory, InventoryStore};
-use termr::tui::{process_next_event, render};
+use termr::tui::render;
 use tokio::sync::mpsc;
 
 fn app() -> App {
@@ -16,7 +16,10 @@ fn app() -> App {
 #[tokio::test]
 async fn input_and_resize_remain_responsive_while_work_is_pending() {
     let mut app = app();
-    app.set_operation_in_progress(true);
+    app.update(UiEvent::Key(KeyEvent::new(
+        KeyCode::Char('R'),
+        KeyModifiers::NONE,
+    )));
     let (sender, mut receiver) = mpsc::unbounded_channel();
 
     sender
@@ -25,13 +28,11 @@ async fn input_and_resize_remain_responsive_while_work_is_pending() {
             height: 12,
         })
         .unwrap();
-    let action = tokio::time::timeout(
-        Duration::from_millis(100),
-        process_next_event(&mut app, &mut receiver),
-    )
-    .await
-    .expect("resize event was blocked")
-    .unwrap();
+    let event = tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+        .await
+        .expect("resize event was blocked")
+        .unwrap();
+    let action = app.update(event);
 
     assert_eq!(action, AppAction::None);
     assert_eq!(app.terminal_size(), (42, 12));
@@ -42,13 +43,11 @@ async fn input_and_resize_remain_responsive_while_work_is_pending() {
             KeyModifiers::NONE,
         )))
         .unwrap();
-    let action = tokio::time::timeout(
-        Duration::from_millis(100),
-        process_next_event(&mut app, &mut receiver),
-    )
-    .await
-    .expect("input event was blocked")
-    .unwrap();
+    let event = tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+        .await
+        .expect("input event was blocked")
+        .unwrap();
+    let action = app.update(event);
 
     assert_eq!(action, AppAction::Quit);
 }

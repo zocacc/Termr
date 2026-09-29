@@ -11,9 +11,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use tokio::sync::mpsc;
 
-use crate::app::{App, AppAction, Overlay, UiEvent, help_text};
+use crate::app::{App, AppAction, Overlay, help_text};
 use crate::event::{EventPump, runtime};
 use crate::inventory::InventoryStore;
 
@@ -25,6 +24,7 @@ async fn run_async(inventory: InventoryStore, hosts_file: PathBuf) -> Result<()>
     let mut terminal = TerminalGuard::enter()?;
     let mut events = EventPump::start();
     let mut app = App::new(inventory);
+    let mut failure = None;
 
     terminal
         .terminal
@@ -36,6 +36,11 @@ async fn run_async(inventory: InventoryStore, hosts_file: PathBuf) -> Result<()>
             AppAction::None => {}
             AppAction::Quit => break,
             AppAction::ReloadInventory => events.reload_inventory(hosts_file.clone()),
+            AppAction::CancelOperation => events.cancel_operation(),
+            AppAction::Fail(message) => {
+                failure = Some(message);
+                break;
+            }
         }
 
         terminal
@@ -45,14 +50,11 @@ async fn run_async(inventory: InventoryStore, hosts_file: PathBuf) -> Result<()>
     }
 
     drop(events);
-    terminal.restore()
-}
-
-pub async fn process_next_event(
-    app: &mut App,
-    receiver: &mut mpsc::UnboundedReceiver<UiEvent>,
-) -> Option<AppAction> {
-    receiver.recv().await.map(|event| app.update(event))
+    terminal.restore()?;
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    Ok(())
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
