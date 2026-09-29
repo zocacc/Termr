@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 mod event;
 pub mod inventory;
+pub mod ssh;
 pub mod tui;
 
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<()> {

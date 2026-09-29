@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+async-trait = "0.1"
 crossterm = "0.29"
 directories = "6.0"
 ratatui = "0.30"
