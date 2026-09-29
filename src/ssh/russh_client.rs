@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use directories::BaseDirs;
-use russh::Disconnect;
 use russh::client;
 use russh::keys::PrivateKeyWithHashAlg;
+use russh::{ChannelMsg, Disconnect};
 
 use crate::inventory::{AuthMethod, Host};
 
@@ -315,10 +315,25 @@ impl SshConnection for RusshConnection {
 
     async fn open_pty(
         &mut self,
-        _request: PtyRequest,
-        _cancellation: CancellationToken,
+        request: PtyRequest,
+        cancellation: CancellationToken,
     ) -> Result<Box<dyn SshPty>, SshError> {
-        Err(not_implemented("Interactive sessions"))
+        let channel = cancellable(&cancellation, self.handle.channel_open_session()).await?;
+        cancellable(
+            &cancellation,
+            channel.request_pty(
+                true,
+                &request.terminal,
+                request.columns,
+                request.rows,
+                0,
+                0,
+                &[],
+            ),
+        )
+        .await?;
+        cancellable(&cancellation, channel.request_shell(true)).await?;
+        Ok(Box::new(RusshPty { channel }))
     }
 
     async fn close(mut self: Box<Self>) -> Result<(), SshError> {
@@ -326,6 +341,68 @@ impl SshConnection for RusshConnection {
             .disconnect(Disconnect::ByApplication, "Termr closed the session", "en")
             .await
             .map_err(map_russh_error)
+    }
+}
+
+struct RusshPty {
+    channel: russh::Channel<client::Msg>,
+}
+
+#[async_trait]
+impl SshPty for RusshPty {
+    async fn send_input(
+        &mut self,
+        input: &[u8],
+        cancellation: CancellationToken,
+    ) -> Result<(), SshError> {
+        cancellable(&cancellation, self.channel.data_bytes(input.to_vec())).await
+    }
+
+    async fn resize(
+        &mut self,
+        columns: u32,
+        rows: u32,
+        cancellation: CancellationToken,
+    ) -> Result<(), SshError> {
+        cancellable(
+            &cancellation,
+            self.channel.window_change(columns, rows, 0, 0),
+        )
+        .await
+    }
+
+    async fn next_output(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<Option<Vec<u8>>, SshError> {
+        loop {
+            let message = tokio::select! {
+                _ = cancellation.cancelled() => return Err(cancelled_error()),
+                message = self.channel.wait() => message,
+            };
+            match message {
+                Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    return Ok(Some(data.to_vec()));
+                }
+                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Ok(None),
+                Some(_) => {}
+            }
+        }
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), SshError> {
+        let _ = self.channel.eof().await;
+        self.channel.close().await.map_err(map_russh_error)
+    }
+}
+
+async fn cancellable<T, F>(cancellation: &CancellationToken, operation: F) -> Result<T, SshError>
+where
+    F: Future<Output = Result<T, russh::Error>>,
+{
+    tokio::select! {
+        _ = cancellation.cancelled() => Err(cancelled_error()),
+        result = operation => result.map_err(map_russh_error),
     }
 }
 
@@ -384,7 +461,7 @@ fn cancelled_error() -> SshError {
 fn not_implemented(operation: &str) -> SshError {
     SshError::new(
         SshErrorKind::Protocol,
-        format!("{operation} will be implemented by the interactive-session task."),
+        format!("{operation} will be implemented by the Run workflow."),
     )
 }
 

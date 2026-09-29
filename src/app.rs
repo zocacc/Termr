@@ -17,6 +17,22 @@ pub enum UiEvent {
         host_id: String,
         status: ConnectionStatus,
     },
+    HostKeyConfirmation {
+        host: String,
+        algorithm: String,
+        fingerprint: String,
+    },
+    InteractiveReady {
+        host_id: String,
+    },
+    InteractiveOutput(Vec<u8>),
+    InteractiveClosed {
+        host_id: String,
+    },
+    InteractiveError {
+        host_id: String,
+        message: String,
+    },
     TerminalFailure(String),
 }
 
@@ -26,6 +42,11 @@ pub enum AppAction {
     Quit,
     ReloadInventory,
     CancelOperation,
+    ConnectHost(String),
+    SessionInput(Vec<u8>),
+    ResizeSession,
+    CloseSession,
+    TrustHostKey(bool),
     Fail(String),
 }
 
@@ -59,7 +80,15 @@ impl ConnectionStatus {
 pub enum Overlay {
     None,
     Help,
-    Error { title: String, message: String },
+    Error {
+        title: String,
+        message: String,
+    },
+    HostKey {
+        host: String,
+        algorithm: String,
+        fingerprint: String,
+    },
 }
 
 #[derive(Debug)]
@@ -77,6 +106,8 @@ pub struct App {
     connection_statuses: HashMap<String, ConnectionStatus>,
     overlay: Overlay,
     progress_frame: usize,
+    session_host_id: Option<String>,
+    session_output: Vec<u8>,
 }
 
 impl App {
@@ -100,6 +131,8 @@ impl App {
             connection_statuses: HashMap::new(),
             overlay: Overlay::None,
             progress_frame: 0,
+            session_host_id: None,
+            session_output: Vec::new(),
         }
     }
 
@@ -108,7 +141,11 @@ impl App {
             UiEvent::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
             UiEvent::Resize { width, height } => {
                 self.terminal_size = (width, height);
-                AppAction::None
+                if self.session_host_id.is_some() {
+                    AppAction::ResizeSession
+                } else {
+                    AppAction::None
+                }
             }
             UiEvent::InventoryReloaded(result) => {
                 if !self.operation_in_progress {
@@ -145,6 +182,51 @@ impl App {
                 {
                     self.connection_statuses.insert(host_id, status);
                 }
+                AppAction::None
+            }
+            UiEvent::HostKeyConfirmation {
+                host,
+                algorithm,
+                fingerprint,
+            } => {
+                self.overlay = Overlay::HostKey {
+                    host,
+                    algorithm,
+                    fingerprint,
+                };
+                AppAction::None
+            }
+            UiEvent::InteractiveReady { host_id } => {
+                self.session_host_id = Some(host_id.clone());
+                self.session_output.clear();
+                self.status = format!("Interactive session: {host_id} (Esc closes)");
+                AppAction::None
+            }
+            UiEvent::InteractiveOutput(output) => {
+                const MAX_EPHEMERAL_OUTPUT: usize = 256 * 1024;
+                self.session_output.extend_from_slice(&output);
+                if self.session_output.len() > MAX_EPHEMERAL_OUTPUT {
+                    let excess = self.session_output.len() - MAX_EPHEMERAL_OUTPUT;
+                    self.session_output.drain(..excess);
+                }
+                AppAction::None
+            }
+            UiEvent::InteractiveClosed { host_id } => {
+                self.session_host_id = None;
+                self.session_output.clear();
+                self.connection_statuses
+                    .insert(host_id.clone(), ConnectionStatus::Disconnected);
+                self.status = format!("Session closed: {host_id}");
+                AppAction::None
+            }
+            UiEvent::InteractiveError { host_id, message } => {
+                self.session_host_id = None;
+                self.connection_statuses
+                    .insert(host_id.clone(), ConnectionStatus::Error);
+                self.overlay = Overlay::Error {
+                    title: format!("Session failed: {host_id}"),
+                    message,
+                };
                 AppAction::None
             }
             UiEvent::TerminalFailure(message) => AppAction::Fail(message),
@@ -185,6 +267,14 @@ impl App {
 
     pub fn overlay(&self) -> &Overlay {
         &self.overlay
+    }
+
+    pub fn session_host_id(&self) -> Option<&str> {
+        self.session_host_id.as_deref()
+    }
+
+    pub fn session_output(&self) -> String {
+        String::from_utf8_lossy(&self.session_output).into_owned()
     }
 
     pub fn progress_indicator(&self) -> &'static str {
@@ -263,9 +353,32 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        if matches!(self.overlay, Overlay::HostKey { .. }) {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.overlay = Overlay::None;
+                    AppAction::TrustHostKey(true)
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.overlay = Overlay::None;
+                    AppAction::TrustHostKey(false)
+                }
+                _ => AppAction::None,
+            };
+        }
         if self.overlay != Overlay::None {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                 self.overlay = Overlay::None;
+            }
+            return AppAction::None;
+        }
+
+        if self.session_host_id.is_some() {
+            if key.code == KeyCode::Esc {
+                return AppAction::CloseSession;
+            }
+            if let Some(bytes) = session_key_bytes(key) {
+                return AppAction::SessionInput(bytes);
             }
             return AppAction::None;
         }
@@ -292,6 +405,10 @@ impl App {
         }
 
         match key.code {
+            KeyCode::Enter => self
+                .focused_host()
+                .map(|host| AppAction::ConnectHost(host.id.clone()))
+                .unwrap_or(AppAction::None),
             KeyCode::Char('q') => AppAction::Quit,
             KeyCode::Char(' ') => {
                 if let Some(host_id) = self.focused_host().map(|host| host.id.clone())
@@ -432,6 +549,28 @@ impl App {
     }
 }
 
+fn session_key_bytes(key: KeyEvent) -> Option<Vec<u8>> {
+    use crossterm::event::KeyModifiers;
+    match key.code {
+        KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let value = (character.to_ascii_lowercase() as u8) & 0x1f;
+            Some(vec![value])
+        }
+        KeyCode::Char(character) => {
+            let mut buffer = [0; 4];
+            Some(character.encode_utf8(&mut buffer).as_bytes().to_vec())
+        }
+        KeyCode::Enter => Some(vec![b'\r']),
+        KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Up => Some(b"\x1b[A".to_vec()),
+        KeyCode::Down => Some(b"\x1b[B".to_vec()),
+        KeyCode::Right => Some(b"\x1b[C".to_vec()),
+        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        _ => None,
+    }
+}
+
 fn sort_and_deduplicate(values: &mut Vec<String>) {
     values.sort_by_key(|value| value.to_lowercase());
     values.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
@@ -453,6 +592,7 @@ pub const fn help_text() -> &'static str {
         "Navigation\n",
         "  ↑/↓ or j/k  Move focus\n",
         "  Space       Toggle host selection\n",
+        "  Enter       Connect/open interactive session\n",
         "  /           Search hosts\n",
         "  g           Cycle group filter\n",
         "  t           Cycle tag filter\n",

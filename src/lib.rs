@@ -15,9 +15,9 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<()> {
     match cli::parse_args(args)? {
         cli::Command::Run => {
             let paths = config::AppPaths::discover()?;
-            let _config = config::AppConfig::load(&paths.config_file)?;
+            let config = config::AppConfig::load(&paths.config_file)?;
             let inventory = inventory::InventoryStore::load(&paths.hosts_file)?;
-            tui::run(inventory, paths.hosts_file)
+            tui::run(inventory, paths.hosts_file, config, paths.known_hosts_file)
         }
         cli::Command::Help => {
             println!("{}", cli::help());

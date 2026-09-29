@@ -167,6 +167,25 @@ impl SessionManager {
         self.sessions.remove(host_id);
     }
 
+    pub fn take_connection_for_interactive(
+        &mut self,
+        host_id: &str,
+    ) -> Option<Box<dyn SshConnection>> {
+        let entry = self.sessions.get_mut(host_id)?;
+        if entry.state != SessionState::Connected {
+            return None;
+        }
+        entry.connection.take()
+    }
+
+    pub fn interactive_closed(&mut self, host_id: &str) {
+        if let Some(entry) = self.sessions.get_mut(host_id) {
+            entry.state = SessionState::Disconnected;
+            entry.cancellation = None;
+            entry.connection = None;
+        }
+    }
+
     pub fn shutdown(&mut self) {
         self.shutting_down = true;
         let host_ids: Vec<_> = self.sessions.keys().cloned().collect();

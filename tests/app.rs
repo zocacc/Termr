@@ -165,3 +165,58 @@ fn terminal_failures_become_actionable_runtime_errors() {
         AppAction::Fail("failed to read terminal input: device unavailable".to_owned())
     );
 }
+
+#[test]
+fn interactive_session_routes_keys_resize_output_and_close() {
+    let mut app = app();
+    assert_eq!(
+        app.update(UiEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
+        AppAction::ConnectHost("olt-lab".to_owned())
+    );
+    app.update(UiEvent::InteractiveReady {
+        host_id: "olt-lab".to_owned(),
+    });
+    assert_eq!(
+        app.update(UiEvent::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+        ))),
+        AppAction::SessionInput(b"s".to_vec())
+    );
+    assert_eq!(
+        app.update(UiEvent::Resize {
+            width: 120,
+            height: 40,
+        }),
+        AppAction::ResizeSession
+    );
+    app.update(UiEvent::InteractiveOutput(b"switch> ".to_vec()));
+    assert_eq!(app.session_output(), "switch> ");
+    assert_eq!(
+        app.update(UiEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))),
+        AppAction::CloseSession
+    );
+}
+
+#[test]
+fn host_key_confirmation_requires_an_explicit_decision() {
+    let mut app = app();
+    app.update(UiEvent::HostKeyConfirmation {
+        host: "olt-lab (192.0.2.10:22)".to_owned(),
+        algorithm: "ssh-ed25519".to_owned(),
+        fingerprint: "SHA256:test".to_owned(),
+    });
+    assert_eq!(
+        app.update(UiEvent::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+        ))),
+        AppAction::TrustHostKey(true)
+    );
+}
