@@ -1,4 +1,7 @@
 use std::io::{self, stdout};
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -11,25 +14,44 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::inventory::InventoryStore;
+use crate::inventory::{Inventory, InventoryStore};
 
-pub fn run(inventory: InventoryStore) -> Result<()> {
+pub fn run(inventory: InventoryStore, hosts_file: PathBuf) -> Result<()> {
     let mut terminal = TerminalGuard::enter()?;
-    let result = run_loop(&mut terminal.terminal, &inventory);
+    let result = run_loop(&mut terminal.terminal, inventory, hosts_file);
     terminal.restore()?;
     result
 }
 
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    inventory: &InventoryStore,
+    mut inventory: InventoryStore,
+    hosts_file: PathBuf,
 ) -> Result<()> {
+    let (reload_sender, reload_receiver) = mpsc::channel();
+    let mut reload_in_progress = false;
+    let mut status = "Press R to reload inventory; q to quit.".to_owned();
+
     loop {
+        if let Ok(result) = reload_receiver.try_recv() {
+            reload_in_progress = false;
+            match result {
+                Ok(candidate) => {
+                    inventory = InventoryStore::new(candidate);
+                    status = format!(
+                        "Inventory reloaded: {} hosts.",
+                        inventory.current().hosts().len()
+                    );
+                }
+                Err(error) => status = format!("Reload failed: {error}"),
+            }
+        }
+
         terminal
             .draw(|frame| {
                 let content = Paragraph::new(format!(
-                    "{} hosts loaded. Press q to quit.",
-                    inventory.current().hosts().len()
+                    "{} hosts loaded. {status}",
+                    inventory.current().hosts().len(),
                 ))
                 .block(Block::default().title(" Termr ").borders(Borders::ALL));
                 frame.render_widget(content, frame.area());
@@ -39,9 +61,20 @@ fn run_loop(
         if event::poll(Duration::from_millis(250)).context("failed to poll terminal events")?
             && let Event::Key(key) = event::read().context("failed to read a terminal event")?
             && key.kind == KeyEventKind::Press
-            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
         {
-            return Ok(());
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Char('R') if !reload_in_progress => {
+                    reload_in_progress = true;
+                    status = "Reloading inventory...".to_owned();
+                    let sender = reload_sender.clone();
+                    let path = hosts_file.clone();
+                    thread::spawn(move || {
+                        let _ = sender.send(Inventory::load(&path));
+                    });
+                }
+                _ => {}
+            }
         }
     }
 }

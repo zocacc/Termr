@@ -43,8 +43,8 @@ hosts:
     address: 192.168.1.10
     username: admin
     auth_method: agent
-  - id: OLT-LAB
-    name: olt-lab
+  - id: olt-lab
+    name: OLT-LAB
     address: 192.168.1.11
     username: admin
     auth_method: agent
@@ -62,7 +62,7 @@ fn authentication_and_required_field_errors_are_aggregated() {
     let error = Inventory::from_yaml(
         r#"
 hosts:
-  - id: invalid id
+  - id: ""
     name: ""
     address: ""
     username: ""
@@ -107,6 +107,43 @@ hosts:
     .unwrap_err();
 
     assert!(!error.to_string().contains(secret));
+}
+
+#[test]
+fn invalid_auth_method_does_not_echo_its_value() {
+    let secret = "do-not-leak-auth-value";
+    let error = Inventory::from_yaml(&format!(
+        r#"
+hosts:
+  - id: server
+    name: server
+    address: localhost
+    username: root
+    auth_method: {secret}
+"#
+    ))
+    .unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("hosts[0].auth_method"));
+    assert!(!message.contains(secret));
+}
+
+#[test]
+fn ids_are_not_restricted_beyond_being_non_empty_and_unique() {
+    let inventory = Inventory::from_yaml(
+        r#"
+hosts:
+  - id: site/core.edge
+    name: core
+    address: localhost
+    username: root
+    auth_method: agent
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(inventory.hosts()[0].id, "site/core.edge");
 }
 
 #[test]

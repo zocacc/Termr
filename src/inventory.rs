@@ -41,7 +41,17 @@ pub struct Inventory {
 
 impl Inventory {
     pub fn from_yaml(yaml: &str) -> Result<Self, InventoryError> {
-        let file: InventoryFile = serde_yaml::from_str(yaml).map_err(InventoryError::Parse)?;
+        let deserializer = serde_yaml::Deserializer::from_str(yaml);
+        let file: InventoryFile =
+            serde_path_to_error::deserialize(deserializer).map_err(|error| {
+                let path = error.path().to_string();
+                let location = error.inner().location();
+                InventoryError::Parse {
+                    path,
+                    line: location.as_ref().map(serde_yaml::Location::line),
+                    column: location.as_ref().map(serde_yaml::Location::column),
+                }
+            })?;
         let inventory = Self { hosts: file.hosts };
         inventory.validate()?;
         Ok(inventory)
@@ -67,10 +77,8 @@ impl Inventory {
         for (index, host) in self.hosts.iter().enumerate() {
             let prefix = format!("hosts[{index}]");
 
-            if !valid_host_id(&host.id) {
-                errors.push(format!(
-                    "{prefix}.id must be 1-64 ASCII letters, numbers, underscores, or hyphens and start with a letter or number"
-                ));
+            if host.id.trim().is_empty() {
+                errors.push(format!("{prefix}.id must not be empty"));
             }
             if host.name.trim().is_empty() {
                 errors.push(format!("{prefix}.name must not be empty"));
@@ -104,18 +112,12 @@ impl Inventory {
                 _ => {}
             }
 
-            let normalized_id = host.id.to_lowercase();
-            if let Some(first) = ids.insert(normalized_id, index) {
-                errors.push(format!(
-                    "{prefix}.id duplicates hosts[{first}].id (comparison is case-insensitive)"
-                ));
+            if let Some(first) = ids.insert(&host.id, index) {
+                errors.push(format!("{prefix}.id duplicates hosts[{first}].id"));
             }
 
-            let normalized_name = host.name.to_lowercase();
-            if let Some(first) = names.insert(normalized_name, index) {
-                errors.push(format!(
-                    "{prefix}.name duplicates hosts[{first}].name (comparison is case-insensitive)"
-                ));
+            if let Some(first) = names.insert(&host.name, index) {
+                errors.push(format!("{prefix}.name duplicates hosts[{first}].name"));
             }
         }
 
@@ -125,19 +127,6 @@ impl Inventory {
             Err(InventoryError::Invalid(errors.join("; ")))
         }
     }
-}
-
-fn valid_host_id(id: &str) -> bool {
-    let mut chars = id.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-
-    id.len() <= 64
-        && first.is_ascii_alphanumeric()
-        && chars.all(|character| {
-            character.is_ascii_alphanumeric() || character == '_' || character == '-'
-        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,8 +174,22 @@ pub enum InventoryError {
         #[source]
         source: std::io::Error,
     },
-    #[error("invalid hosts.yaml: {0}")]
-    Parse(#[source] serde_yaml::Error),
+    #[error(
+        "invalid hosts.yaml at {path}{location}",
+        location = format_location(*line, *column)
+    )]
+    Parse {
+        path: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
     #[error("invalid hosts.yaml: {0}")]
     Invalid(String),
+}
+
+fn format_location(line: Option<usize>, column: Option<usize>) -> String {
+    match (line, column) {
+        (Some(line), Some(column)) => format!(" (line {line}, column {column})"),
+        _ => String::new(),
+    }
 }
