@@ -116,7 +116,7 @@ impl Drop for EventPump {
 
 pub fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
-        .enable_time()
+        .enable_all()
         .build()
         .context("failed to initialize the asynchronous runtime")
 }

@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 mod event;
 pub mod inventory;
+pub mod session;
 pub mod ssh;
 pub mod tui;
 
