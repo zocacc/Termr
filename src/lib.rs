@@ -4,6 +4,7 @@ use anyhow::Result;
 
 pub mod cli;
 pub mod config;
+pub mod inventory;
 mod tui;
 
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<()> {
@@ -11,7 +12,8 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<()> {
         cli::Command::Run => {
             let paths = config::AppPaths::discover()?;
             let _config = config::AppConfig::load(&paths.config_file)?;
-            tui::run()
+            let inventory = inventory::InventoryStore::load(&paths.hosts_file)?;
+            tui::run(inventory)
         }
         cli::Command::Help => {
             println!("{}", cli::help());

@@ -11,19 +11,27 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-pub fn run() -> Result<()> {
+use crate::inventory::InventoryStore;
+
+pub fn run(inventory: InventoryStore) -> Result<()> {
     let mut terminal = TerminalGuard::enter()?;
-    let result = run_loop(&mut terminal.terminal);
+    let result = run_loop(&mut terminal.terminal, &inventory);
     terminal.restore()?;
     result
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    inventory: &InventoryStore,
+) -> Result<()> {
     loop {
         terminal
             .draw(|frame| {
-                let content = Paragraph::new("Foundation ready. Press q to quit.")
-                    .block(Block::default().title(" Termr ").borders(Borders::ALL));
+                let content = Paragraph::new(format!(
+                    "{} hosts loaded. Press q to quit.",
+                    inventory.current().hosts().len()
+                ))
+                .block(Block::default().title(" Termr ").borders(Borders::ALL));
                 frame.render_widget(content, frame.area());
             })
             .context("failed to draw the terminal interface")?;
