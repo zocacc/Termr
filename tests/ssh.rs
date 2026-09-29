@@ -47,6 +47,7 @@ async fn fake_connects_only_after_host_key_verification() {
 
 #[tokio::test]
 async fn fake_models_distinct_connection_failures() {
+    let verifier = Arc::new(RecordingVerifier::default());
     let error = SshError::new(SshErrorKind::ConnectionRefused, "connection refused");
     let client = FakeSshClient::new(FakeScript {
         connect_error: Some(error),
@@ -54,11 +55,7 @@ async fn fake_models_distinct_connection_failures() {
     });
 
     let result = client
-        .connect(
-            request(),
-            Arc::new(RecordingVerifier::default()),
-            CancellationToken::new(),
-        )
+        .connect(request(), verifier.clone(), CancellationToken::new())
         .await;
     let error = match result {
         Ok(_) => panic!("connection unexpectedly succeeded"),
@@ -67,6 +64,73 @@ async fn fake_models_distinct_connection_failures() {
 
     assert_eq!(error.kind(), SshErrorKind::ConnectionRefused);
     assert_eq!(error.to_string(), "connection refused");
+    assert!(verifier.keys.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_interrupts_a_pending_pty_stream() {
+    let client = FakeSshClient::new(FakeScript {
+        pty_output_delay: Duration::from_secs(30),
+        pty_output: vec![b"late output".to_vec()],
+        ..FakeScript::default()
+    });
+    let mut connection = client
+        .connect(
+            request(),
+            Arc::new(RecordingVerifier::default()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut pty = connection
+        .open_pty(
+            PtyRequest::new("xterm-256color", 80, 24),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = pty.next_output(cancellation).await.unwrap_err();
+
+    assert_eq!(error.kind(), SshErrorKind::Cancelled);
+}
+
+#[tokio::test]
+async fn fake_models_pty_stream_failures_and_distinct_close_events() {
+    let client = FakeSshClient::new(FakeScript {
+        pty_output_error: Some(SshError::new(SshErrorKind::Closed, "stream closed")),
+        ..FakeScript::default()
+    });
+    let mut connection = client
+        .connect(
+            request(),
+            Arc::new(RecordingVerifier::default()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let pty = connection
+        .open_pty(
+            PtyRequest::new("xterm-256color", 80, 24),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut pty = pty;
+    assert_eq!(
+        pty.next_output(CancellationToken::new())
+            .await
+            .unwrap_err()
+            .kind(),
+        SshErrorKind::Closed
+    );
+    pty.close().await.unwrap();
+    assert!(client.observation().pty_closed);
+    assert!(!client.observation().connection_closed);
+    connection.close().await.unwrap();
+    assert!(client.observation().connection_closed);
 }
 
 #[tokio::test]

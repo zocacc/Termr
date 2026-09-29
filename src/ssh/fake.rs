@@ -18,6 +18,10 @@ pub struct FakeScript {
     pub exec_stdout: Vec<u8>,
     pub exec_stderr: Vec<u8>,
     pub exec_status: Option<u32>,
+    pub pty_open_delay: Duration,
+    pub pty_open_error: Option<SshError>,
+    pub pty_output_delay: Duration,
+    pub pty_output_error: Option<SshError>,
     pub pty_output: Vec<Vec<u8>>,
     pub server_key: HostKey,
 }
@@ -32,6 +36,10 @@ impl Default for FakeScript {
             exec_stdout: Vec::new(),
             exec_stderr: Vec::new(),
             exec_status: Some(0),
+            pty_open_delay: Duration::ZERO,
+            pty_open_error: None,
+            pty_output_delay: Duration::ZERO,
+            pty_output_error: None,
             pty_output: Vec::new(),
             server_key: HostKey {
                 algorithm: "ssh-ed25519".to_owned(),
@@ -48,7 +56,8 @@ pub struct FakeObservation {
     pub commands: Vec<String>,
     pub pty_input: Vec<u8>,
     pub pty_size: Option<(u32, u32)>,
-    pub closed: bool,
+    pub connection_closed: bool,
+    pub pty_closed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,10 +88,10 @@ impl SshClient for FakeSshClient {
         cancellation: CancellationToken,
     ) -> Result<Box<dyn SshConnection>, SshError> {
         wait_or_cancel(self.script.connect_delay, &cancellation).await?;
-        verifier.verify(&request, &self.script.server_key).await?;
         if let Some(error) = &self.script.connect_error {
             return Err(error.clone());
         }
+        verifier.verify(&request, &self.script.server_key).await?;
 
         self.observation.lock().unwrap().connections += 1;
         Ok(Box::new(FakeConnection {
@@ -125,22 +134,29 @@ impl SshConnection for FakeConnection {
         request: PtyRequest,
         cancellation: CancellationToken,
     ) -> Result<Box<dyn SshPty>, SshError> {
-        cancelled(&cancellation)?;
+        wait_or_cancel(self.script.pty_open_delay, &cancellation).await?;
+        if let Some(error) = &self.script.pty_open_error {
+            return Err(error.clone());
+        }
         self.observation.lock().unwrap().pty_size = Some((request.columns, request.rows));
         Ok(Box::new(FakePty {
             output: self.script.pty_output.clone().into(),
+            output_delay: self.script.pty_output_delay,
+            output_error: self.script.pty_output_error.clone(),
             observation: Arc::clone(&self.observation),
         }))
     }
 
     async fn close(self: Box<Self>) -> Result<(), SshError> {
-        self.observation.lock().unwrap().closed = true;
+        self.observation.lock().unwrap().connection_closed = true;
         Ok(())
     }
 }
 
 struct FakePty {
     output: VecDeque<Vec<u8>>,
+    output_delay: Duration,
+    output_error: Option<SshError>,
     observation: Arc<Mutex<FakeObservation>>,
 }
 
@@ -175,12 +191,15 @@ impl SshPty for FakePty {
         &mut self,
         cancellation: CancellationToken,
     ) -> Result<Option<Vec<u8>>, SshError> {
-        cancelled(&cancellation)?;
+        wait_or_cancel(self.output_delay, &cancellation).await?;
+        if let Some(error) = &self.output_error {
+            return Err(error.clone());
+        }
         Ok(self.output.pop_front())
     }
 
     async fn close(self: Box<Self>) -> Result<(), SshError> {
-        self.observation.lock().unwrap().closed = true;
+        self.observation.lock().unwrap().pty_closed = true;
         Ok(())
     }
 }
