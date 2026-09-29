@@ -8,7 +8,8 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
@@ -69,16 +70,32 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     .areas(area);
 
     frame.render_widget(Paragraph::new("Termr"), header);
+    let visible = app.visible_hosts();
+    if visible.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No hosts match the current search and filters")
+                .block(Block::default().title(" Hosts ").borders(Borders::ALL)),
+            body,
+        );
+    } else {
+        let items = visible
+            .iter()
+            .map(|host| ListItem::new(format!("{}  {}:{}", host.name, host.address, host.port)));
+        let list = List::new(items)
+            .block(Block::default().title(" Hosts ").borders(Borders::ALL))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        let mut state = ListState::default().with_selected(app.focused_index());
+        frame.render_stateful_widget(list, body, &mut state);
+    }
     frame.render_widget(
         Paragraph::new(format!(
-            "{} hosts loaded",
-            app.inventory().current().hosts().len()
-        ))
-        .block(Block::default().title(" Hosts ").borders(Borders::ALL)),
-        body,
-    );
-    frame.render_widget(
-        Paragraph::new(format!("{}  [R] Reload  [q] Quit", app.status())),
+            "{}  /{}  g:{}  t:{}  [R] Reload [q] Quit",
+            app.status(),
+            app.search_query(),
+            app.active_group().unwrap_or("all"),
+            app.active_tag().unwrap_or("all")
+        )),
         footer,
     );
 }
