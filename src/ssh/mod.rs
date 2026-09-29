@@ -8,6 +8,7 @@ use thiserror::Error;
 use tokio::sync::Notify;
 
 pub mod fake;
+pub mod host_key;
 mod russh_client;
 
 pub use russh_client::{RusshClient, connect_request_for_host};
