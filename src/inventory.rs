@@ -47,6 +47,7 @@ impl Inventory {
                 let path = error.path().to_string();
                 let location = error.inner().location();
                 InventoryError::Parse {
+                    reason: safe_parse_reason(&path),
                     path,
                     line: location.as_ref().map(serde_yaml::Location::line),
                     column: location.as_ref().map(serde_yaml::Location::column),
@@ -175,13 +176,14 @@ pub enum InventoryError {
         source: std::io::Error,
     },
     #[error(
-        "invalid hosts.yaml at {path}{location}",
+        "invalid hosts.yaml at {path}{location}: {reason}",
         location = format_location(*line, *column)
     )]
     Parse {
         path: String,
         line: Option<usize>,
         column: Option<usize>,
+        reason: &'static str,
     },
     #[error("invalid hosts.yaml: {0}")]
     Invalid(String),
@@ -191,5 +193,21 @@ fn format_location(line: Option<usize>, column: Option<usize>) -> String {
     match (line, column) {
         (Some(line), Some(column)) => format!(" (line {line}, column {column})"),
         _ => String::new(),
+    }
+}
+
+fn safe_parse_reason(path: &str) -> &'static str {
+    if path.ends_with(".auth_method") {
+        "auth_method must be identity_file or agent"
+    } else if path.ends_with(".port") {
+        "port must be an integer from 0 to 65535"
+    } else if path.ends_with(".tags") {
+        "tags must be a list of strings"
+    } else if path.ends_with(".identity_file") {
+        "identity_file must be a filesystem path string"
+    } else if path == "hosts" {
+        "hosts must be a list of host mappings"
+    } else {
+        "expected valid YAML fields and value types from the Host schema"
     }
 }

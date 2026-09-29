@@ -126,6 +126,7 @@ hosts:
     let message = error.to_string();
 
     assert!(message.contains("hosts[0].auth_method"));
+    assert!(message.contains("identity_file or agent"));
     assert!(!message.contains(secret));
 }
 
