@@ -75,7 +75,7 @@ impl EventPump {
     pub fn reload_inventory(&self, path: PathBuf) {
         let sender = self.sender.clone();
         tokio::task::spawn_blocking(move || {
-            let result = Inventory::load(&path).map_err(|error| error.to_string());
+            let result = Inventory::load(&path);
             let _ = sender.send(UiEvent::InventoryReloaded(result));
         });
     }

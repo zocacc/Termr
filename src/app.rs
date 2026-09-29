@@ -1,13 +1,22 @@
+use std::collections::{HashMap, HashSet};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::inventory::{Host, Inventory, InventoryStore};
+use crate::inventory::{Host, Inventory, InventoryError, InventoryStore};
 
 #[derive(Debug)]
 pub enum UiEvent {
     Key(KeyEvent),
-    Resize { width: u16, height: u16 },
+    Resize {
+        width: u16,
+        height: u16,
+    },
     Tick,
-    InventoryReloaded(Result<Inventory, String>),
+    InventoryReloaded(Result<Inventory, InventoryError>),
+    ConnectionStatusChanged {
+        host_id: String,
+        status: ConnectionStatus,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +32,33 @@ pub enum InputMode {
     Search,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    #[default]
+    Disconnected,
+    Connecting,
+    Connected,
+    Error,
+}
+
+impl ConnectionStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Disconnected => "disconnected",
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    Help,
+    Error { title: String, message: String },
+}
+
 #[derive(Debug)]
 pub struct App {
     inventory: InventoryStore,
@@ -34,6 +70,10 @@ pub struct App {
     active_group: Option<String>,
     active_tag: Option<String>,
     input_mode: InputMode,
+    selected_host_ids: HashSet<String>,
+    connection_statuses: HashMap<String, ConnectionStatus>,
+    overlay: Overlay,
+    progress_frame: usize,
 }
 
 impl App {
@@ -53,6 +93,10 @@ impl App {
             active_group: None,
             active_tag: None,
             input_mode: InputMode::Normal,
+            selected_host_ids: HashSet::new(),
+            connection_statuses: HashMap::new(),
+            overlay: Overlay::None,
+            progress_frame: 0,
         }
     }
 
@@ -68,17 +112,40 @@ impl App {
                 match result {
                     Ok(candidate) => {
                         self.inventory = InventoryStore::new(candidate);
+                        self.reconcile_inventory_state();
                         self.reconcile_focus();
                         self.status = format!(
                             "Inventory reloaded: {} hosts",
                             self.inventory.current().hosts().len()
                         );
                     }
-                    Err(error) => self.status = format!("Reload failed: {error}"),
+                    Err(error) => {
+                        self.status = "Inventory reload failed".to_owned();
+                        self.overlay = Overlay::Error {
+                            title: "Inventory reload failed".to_owned(),
+                            message: error.to_string(),
+                        };
+                    }
                 }
                 AppAction::None
             }
-            UiEvent::Key(_) | UiEvent::Tick => AppAction::None,
+            UiEvent::ConnectionStatusChanged { host_id, status } => {
+                if self
+                    .inventory
+                    .current()
+                    .hosts()
+                    .iter()
+                    .any(|host| host.id == host_id)
+                {
+                    self.connection_statuses.insert(host_id, status);
+                }
+                AppAction::None
+            }
+            UiEvent::Tick => {
+                self.progress_frame = self.progress_frame.wrapping_add(1);
+                AppAction::None
+            }
+            UiEvent::Key(_) => AppAction::None,
         }
     }
 
@@ -100,6 +167,30 @@ impl App {
 
     pub fn set_operation_in_progress(&mut self, in_progress: bool) {
         self.operation_in_progress = in_progress;
+    }
+
+    pub fn selected_host_ids(&self) -> &HashSet<String> {
+        &self.selected_host_ids
+    }
+
+    pub fn connection_status(&self, host_id: &str) -> ConnectionStatus {
+        self.connection_statuses
+            .get(host_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn overlay(&self) -> &Overlay {
+        &self.overlay
+    }
+
+    pub fn progress_indicator(&self) -> &'static str {
+        const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+        if self.operation_in_progress {
+            FRAMES[self.progress_frame % FRAMES.len()]
+        } else {
+            ""
+        }
     }
 
     pub fn visible_hosts(&self) -> Vec<&Host> {
@@ -169,6 +260,13 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        if self.overlay != Overlay::None {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+                self.overlay = Overlay::None;
+            }
+            return AppAction::None;
+        }
+
         if self.input_mode == InputMode::Search {
             match key.code {
                 KeyCode::Enter => self.input_mode = InputMode::Normal,
@@ -192,6 +290,14 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => AppAction::Quit,
+            KeyCode::Char(' ') => {
+                if let Some(host_id) = self.focused_host().map(|host| host.id.clone())
+                    && !self.selected_host_ids.remove(&host_id)
+                {
+                    self.selected_host_ids.insert(host_id);
+                }
+                AppAction::None
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_focus(-1);
                 AppAction::None
@@ -218,6 +324,14 @@ impl App {
                 self.active_tag = None;
                 self.input_mode = InputMode::Normal;
                 self.reconcile_focus();
+                AppAction::None
+            }
+            KeyCode::Char('?') => {
+                self.overlay = Overlay::Help;
+                AppAction::None
+            }
+            KeyCode::Esc => {
+                self.status = "Ready".to_owned();
                 AppAction::None
             }
             KeyCode::Char('R') if !self.operation_in_progress => {
@@ -268,6 +382,20 @@ impl App {
         self.focused_host_id = next_id;
     }
 
+    fn reconcile_inventory_state(&mut self) {
+        let ids: HashSet<_> = self
+            .inventory
+            .current()
+            .hosts()
+            .iter()
+            .map(|host| host.id.as_str())
+            .collect();
+        self.selected_host_ids
+            .retain(|host_id| ids.contains(host_id.as_str()));
+        self.connection_statuses
+            .retain(|host_id, _| ids.contains(host_id.as_str()));
+    }
+
     fn cycle_group(&mut self) {
         let mut values: Vec<_> = self
             .inventory
@@ -309,4 +437,20 @@ fn next_filter(values: &[String], current: Option<&str>) -> Option<String> {
         .position(|value| value.eq_ignore_ascii_case(current))
         .and_then(|index| values.get(index + 1))
         .cloned()
+}
+
+pub const fn help_text() -> &'static str {
+    concat!(
+        "Navigation\n",
+        "  ↑/↓ or j/k  Move focus\n",
+        "  Space       Toggle host selection\n",
+        "  /           Search hosts\n",
+        "  g           Cycle group filter\n",
+        "  t           Cycle tag filter\n",
+        "  c           Clear search and filters\n",
+        "  R           Reload inventory\n",
+        "  ?           Toggle this help\n",
+        "  Esc         Cancel or close\n",
+        "  q           Quit"
+    )
 }

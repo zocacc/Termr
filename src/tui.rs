@@ -7,13 +7,13 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
-use crate::app::{App, AppAction, UiEvent};
+use crate::app::{App, AppAction, Overlay, UiEvent, help_text};
 use crate::event::{EventPump, runtime};
 use crate::inventory::InventoryStore;
 
@@ -69,7 +69,13 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     ])
     .areas(area);
 
-    frame.render_widget(Paragraph::new("Termr"), header);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Termr  selected: {}",
+            app.selected_host_ids().len()
+        )),
+        header,
+    );
     let visible = app.visible_hosts();
     if visible.is_empty() {
         frame.render_widget(
@@ -78,9 +84,20 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             body,
         );
     } else {
-        let items = visible
-            .iter()
-            .map(|host| ListItem::new(format!("{}  {}:{}", host.name, host.address, host.port)));
+        let items = visible.iter().map(|host| {
+            let selected = if app.selected_host_ids().contains(&host.id) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            ListItem::new(format!(
+                "{selected} {}  {}:{}  {}",
+                host.name,
+                host.address,
+                host.port,
+                app.connection_status(&host.id).label()
+            ))
+        });
         let list = List::new(items)
             .block(Block::default().title(" Hosts ").borders(Borders::ALL))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
@@ -90,7 +107,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     }
     frame.render_widget(
         Paragraph::new(format!(
-            "{}  /{}  g:{}  t:{}  [R] Reload [q] Quit",
+            "{} {}  /{}  g:{}  t:{}  [?] Help [R] Reload [q] Quit",
+            app.progress_indicator(),
             app.status(),
             app.search_query(),
             app.active_group().unwrap_or("all"),
@@ -98,6 +116,34 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         )),
         footer,
     );
+
+    match app.overlay() {
+        Overlay::None => {}
+        Overlay::Help => render_overlay(frame, " Help ", help_text()),
+        Overlay::Error { title, message } => render_overlay(frame, title, message),
+    }
+}
+
+fn render_overlay(frame: &mut Frame<'_>, title: &str, message: &str) {
+    let area = centered_rect(frame.area(), 70, 18);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(message)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().title(title).borders(Borders::ALL)),
+        area,
+    );
+}
+
+fn centered_rect(area: Rect, maximum_width: u16, maximum_height: u16) -> Rect {
+    let width = maximum_width.min(area.width.saturating_sub(2)).max(1);
+    let height = maximum_height.min(area.height.saturating_sub(2)).max(1);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 struct TerminalGuard {
