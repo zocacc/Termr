@@ -1,82 +1,86 @@
 use std::io::{self, stdout};
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::{Frame, Terminal};
+use tokio::sync::mpsc;
 
-use crate::inventory::{Inventory, InventoryStore};
+use crate::app::{App, AppAction, UiEvent};
+use crate::event::{EventPump, runtime};
+use crate::inventory::InventoryStore;
 
 pub fn run(inventory: InventoryStore, hosts_file: PathBuf) -> Result<()> {
-    let mut terminal = TerminalGuard::enter()?;
-    let result = run_loop(&mut terminal.terminal, inventory, hosts_file);
-    terminal.restore()?;
-    result
+    runtime()?.block_on(run_async(inventory, hosts_file))
 }
 
-fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    mut inventory: InventoryStore,
-    hosts_file: PathBuf,
-) -> Result<()> {
-    let (reload_sender, reload_receiver) = mpsc::channel();
-    let mut reload_in_progress = false;
-    let mut status = "Press R to reload inventory; q to quit.".to_owned();
+async fn run_async(inventory: InventoryStore, hosts_file: PathBuf) -> Result<()> {
+    let mut terminal = TerminalGuard::enter()?;
+    let mut events = EventPump::start();
+    let mut app = App::new(inventory);
 
-    loop {
-        if let Ok(result) = reload_receiver.try_recv() {
-            reload_in_progress = false;
-            match result {
-                Ok(candidate) => {
-                    inventory = InventoryStore::new(candidate);
-                    status = format!(
-                        "Inventory reloaded: {} hosts.",
-                        inventory.current().hosts().len()
-                    );
-                }
-                Err(error) => status = format!("Reload failed: {error}"),
-            }
+    terminal
+        .terminal
+        .draw(|frame| render(frame, &app))
+        .context("failed to draw the terminal interface")?;
+
+    while let Some(event) = events.receive().await {
+        match app.update(event) {
+            AppAction::None => {}
+            AppAction::Quit => break,
+            AppAction::ReloadInventory => events.reload_inventory(hosts_file.clone()),
         }
 
         terminal
-            .draw(|frame| {
-                let content = Paragraph::new(format!(
-                    "{} hosts loaded. {status}",
-                    inventory.current().hosts().len(),
-                ))
-                .block(Block::default().title(" Termr ").borders(Borders::ALL));
-                frame.render_widget(content, frame.area());
-            })
+            .terminal
+            .draw(|frame| render(frame, &app))
             .context("failed to draw the terminal interface")?;
-
-        if event::poll(Duration::from_millis(250)).context("failed to poll terminal events")?
-            && let Event::Key(key) = event::read().context("failed to read a terminal event")?
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('R') if !reload_in_progress => {
-                    reload_in_progress = true;
-                    status = "Reloading inventory...".to_owned();
-                    let sender = reload_sender.clone();
-                    let path = hosts_file.clone();
-                    thread::spawn(move || {
-                        let _ = sender.send(Inventory::load(&path));
-                    });
-                }
-                _ => {}
-            }
-        }
     }
+
+    drop(events);
+    terminal.restore()
+}
+
+pub async fn process_next_event(
+    app: &mut App,
+    receiver: &mut mpsc::UnboundedReceiver<UiEvent>,
+) -> Option<AppAction> {
+    receiver.recv().await.map(|event| app.update(event))
+}
+
+pub fn render(frame: &mut Frame<'_>, app: &App) {
+    let area = frame.area();
+    if area.width < 20 || area.height < 4 {
+        frame.render_widget(Paragraph::new("Termr - terminal too small"), area);
+        return;
+    }
+
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+
+    frame.render_widget(Paragraph::new("Termr"), header);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{} hosts loaded",
+            app.inventory().current().hosts().len()
+        ))
+        .block(Block::default().title(" Hosts ").borders(Borders::ALL)),
+        body,
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{}  [R] Reload  [q] Quit", app.status())),
+        footer,
+    );
 }
 
 struct TerminalGuard {

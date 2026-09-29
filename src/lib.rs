@@ -2,10 +2,12 @@ use std::ffi::OsString;
 
 use anyhow::Result;
 
+pub mod app;
 pub mod cli;
 pub mod config;
+mod event;
 pub mod inventory;
-mod tui;
+pub mod tui;
 
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<()> {
     match cli::parse_args(args)? {
