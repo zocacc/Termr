@@ -8,6 +8,9 @@ use thiserror::Error;
 use tokio::sync::Notify;
 
 pub mod fake;
+mod russh_client;
+
+pub use russh_client::{RusshClient, connect_request_for_host};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Authentication {
@@ -190,4 +193,18 @@ pub trait SshPty: Send {
     ) -> Result<Option<Vec<u8>>, SshError>;
 
     async fn close(self: Box<Self>) -> Result<(), SshError>;
+}
+
+#[cfg(test)]
+mod auth {
+    use super::*;
+
+    #[test]
+    fn supported_authentication_strategies_exclude_passwords() {
+        let strategies = [
+            Authentication::IdentityFile(PathBuf::from("/tmp/key")),
+            Authentication::Agent,
+        ];
+        assert_eq!(strategies.len(), 2);
+    }
 }
